@@ -21,10 +21,10 @@ class LinkFailureRecovery(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
 
-        # 🔥 FIREWALL RULE: block h1 → h3
+        # FIREWALL RULE: block h1 → h3
         self.blocked_pairs = [("00:00:00:00:00:01", "00:00:00:00:00:03")]
 
-    # 🔹 Switch connects
+    #Switch connects
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -37,7 +37,7 @@ class LinkFailureRecovery(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
-    # 🔹 Add flow
+    #Add flow
     def add_flow(self, datapath, priority, match, actions):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -53,7 +53,7 @@ class LinkFailureRecovery(app_manager.RyuApp):
         )
         datapath.send_msg(mod)
 
-    # 🔹 Packet handling
+    #Packet handling
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
         msg = ev.msg
@@ -71,7 +71,7 @@ class LinkFailureRecovery(app_manager.RyuApp):
         src = eth.src
         in_port = msg.match['in_port']
 
-        # 🔥 FIREWALL CHECK
+        #FIREWALL CHECK
         if (src, dst) in self.blocked_pairs:
             self.logger.info("BLOCKED: %s -> %s", src, dst)
             return  # Drop packet
@@ -115,7 +115,7 @@ class LinkFailureRecovery(app_manager.RyuApp):
 
         self.logger.info("Topology: %s", self.net.edges())
 
-    # 🔹 Link failure detection
+    #Link failure detection
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
         link = ev.link
@@ -129,7 +129,7 @@ class LinkFailureRecovery(app_manager.RyuApp):
 
         self.recompute_paths()
 
-    # 🔹 Recompute paths
+    #Recompute paths
     def recompute_paths(self):
         self.logger.info("Recomputing paths...")
 

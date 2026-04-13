@@ -118,9 +118,16 @@ Result:
 
 Include:
 
-* Controller logs (link failure detected)
+* Controller logs (link failure detected
+<img width="336" height="292" alt="{3214C37B-DBD4-4FA0-89C3-EBEBE55B8672}" src="https://github.com/user-attachments/assets/1003aa75-597b-41a0-b943-86d508e1c86e" />
+
+
 * pingall before failure
+  <img width="246" height="78" alt="{05B8B5A1-8DA7-4AA7-867E-A7F002D0AAA0}" src="https://github.com/user-attachments/assets/8517c445-ad94-483e-b5fb-22185908c528" />
+
 * pingall after failure
+  <img width="243" height="76" alt="{CB974CC0-5B0B-4009-A487-77901CEB25F4}" src="https://github.com/user-attachments/assets/b6518d87-e2a1-406e-bfb3-f4782844d995" />
+
 * Firewall blocking output
 
 ---

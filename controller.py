@@ -1,143 +1,135 @@
-import collections
-import collections.abc
-collections.MutableMapping = collections.abc.MutableMapping
+from pox.core import core
+from pox.lib.util import dpid_to_str
+from pox.lib.revent import EventMixin
+import pox.openflow.libopenflow_01 as of
+import datetime
 
-from ryu.base import app_manager
-from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
-from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet
-from ryu.topology import event
-from ryu.topology.api import get_switch, get_link
-import networkx as nx
+log = core.getLogger()
+
+def logp(tag, msg):
+    ts = datetime.datetime.now().strftime('%H:%M:%S')
+    sym = {'INFO': '---', 'WARN': '!!!', 'SUCCESS': '+++'}
+    print(f"[{ts}] {sym.get(tag, '---')} [{tag}] {msg}", flush=True)
 
 
-class LinkFailureRecovery(app_manager.RyuApp):
-    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+class SwitchController(EventMixin):
+    """
+    Learning switch with:
+    - Table-miss -> controller (no buffering)
+    - MAC learning
+    - Flow install using buffer_id when available
+    - On port delete: flush flows + clear MAC table (forces re-learn on new path)
+    """
 
-    def __init__(self, *args, **kwargs):
-        super(LinkFailureRecovery, self).__init__(*args, **kwargs)
-        self.net = nx.DiGraph()
-        self.mac_to_port = {}
-        self.datapaths = {}
+    def __init__(self, connection, dpid):
+        self.connection = connection
+        self.dpid = dpid
+        self.mac_to_port = {}  # {EthAddr -> port_no}
 
-        # FIREWALL RULE: block h1 → h3
-        self.blocked_pairs = [("00:00:00:00:00:01", "00:00:00:00:00:03")]
+        connection.addListeners(self)
+        logp('INFO', f'Switch {dpid_to_str(dpid)} connected.')
+        self._install_table_miss()
 
-    #Switch connects
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        self.datapaths[datapath.id] = datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+    def _install_table_miss(self):
+        fm = of.ofp_flow_mod()
+        fm.priority = 0
+        fm.match = of.ofp_match()  # match all
+        # Send full packet to controller (avoid OVS buffering weirdness)
+        fm.actions.append(of.ofp_action_output(
+            port=of.OFPP_CONTROLLER,
+            max_len=of.OFPCML_NO_BUFFER
+        ))
+        self.connection.send(fm)
 
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
+    def _flush_flows(self):
+        fm = of.ofp_flow_mod()
+        fm.command = of.OFPFC_DELETE
+        fm.out_port = of.OFPP_NONE
+        fm.match = of.ofp_match()  # delete all
+        self.connection.send(fm)
+        self._install_table_miss()
+        logp('INFO', f's{self.dpid}: Flow table flushed.')
 
-    #Add flow
-    def add_flow(self, datapath, priority, match, actions):
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+    def _handle_PacketIn(self, event):
+        packet = event.parsed
+        inport = event.port
 
-        inst = [parser.OFPInstructionActions(
-            ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        if packet is None or not packet.parsed:
+            return
 
-        mod = parser.OFPFlowMod(
-            datapath=datapath,
-            priority=priority,
-            match=match,
-            instructions=inst
-        )
-        datapath.send_msg(mod)
+        src_mac = packet.src
+        dst_mac = packet.dst
 
-    #Packet handling
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def packet_in_handler(self, ev):
-        msg = ev.msg
-        datapath = msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        # Learn / update source MAC -> port
+        old = self.mac_to_port.get(src_mac)
+        if old is None:
+            self.mac_to_port[src_mac] = inport
+            logp('INFO', f's{self.dpid}: Learned {src_mac} on port {inport}')
+        elif old != inport:
+            # In real networks MAC moves happen; update.
+            logp('WARN', f's{self.dpid}: MAC {src_mac} moved {old} -> {inport}')
+            self.mac_to_port[src_mac] = inport
 
-        dpid = datapath.id
-        self.mac_to_port.setdefault(dpid, {})
+        # Forwarding decision
+        out_port = self.mac_to_port.get(dst_mac)
 
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocol(ethernet.ethernet)
+        if out_port is None:
+            # Unknown dst: flood (STP in Mininet will prevent loop storms)
+            po = of.ofp_packet_out()
+            po.in_port = inport
+            po.data = event.ofp
+            po.actions.append(of.ofp_action_output(port=of.OFPP_FLOOD))
+            self.connection.send(po)
+            logp('INFO', f's{self.dpid}: Flooded for unknown {dst_mac}')
+            return
 
-        dst = eth.dst
-        src = eth.src
-        in_port = msg.match['in_port']
+        # Known dst: don't send back out same port
+        if out_port == inport:
+            return
 
-        #FIREWALL CHECK
-        if (src, dst) in self.blocked_pairs:
-            self.logger.info("BLOCKED: %s -> %s", src, dst)
-            return  # Drop packet
+        # Install flow for this direction
+        fm = of.ofp_flow_mod()
+        fm.priority = 10
+        fm.idle_timeout = 30
+        fm.hard_timeout = 120
+        fm.match = of.ofp_match(in_port=inport, dl_dst=dst_mac)
+        fm.actions.append(of.ofp_action_output(port=out_port))
 
-        # Learn MAC
-        self.mac_to_port[dpid][src] = in_port
-
-        # Forwarding logic
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
+        # IMPORTANT: use buffer_id when switch buffered the packet
+        # (even though we set NO_BUFFER in table-miss, keep this correct anyway)
+        if hasattr(event.ofp, "buffer_id") and event.ofp.buffer_id not in (None, -1):
+            fm.buffer_id = event.ofp.buffer_id
         else:
-            out_port = ofproto.OFPP_FLOOD
+            fm.data = event.ofp
 
-        actions = [parser.OFPActionOutput(out_port)]
+        self.connection.send(fm)
+        logp('SUCCESS', f's{self.dpid}: Flow {inport}->{dst_mac}->port {out_port}')
 
-        # Install flow rule
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            self.add_flow(datapath, 1, match, actions)
+    def _handle_PortStatus(self, event):
+        # Some OVS setups report link down as PORT_STATUS with reason=DELETE.
+        port = event.ofp.desc.port_no
+        reason = event.ofp.reason
 
-        # Send packet
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=msg.buffer_id,
-            in_port=in_port,
-            actions=actions,
-            data=msg.data
-        )
-        datapath.send_msg(out)
+        if reason == of.OFPPR_DELETE:
+            logp('WARN', f'LINK FAILURE on s{self.dpid} port {port}')
+            self.mac_to_port.clear()
+            self._flush_flows()
+            logp('SUCCESS', f's{self.dpid}: Cleared MAC table and flushed flows (re-learn).')
+        elif reason == of.OFPPR_ADD:
+            logp('SUCCESS', f'LINK RESTORED on s{self.dpid} port {port}')
+        else:
+            # MODIFY or other
+            logp('INFO', f's{self.dpid}: PortStatus reason={reason} port={port}')
 
-    # 🔹 Topology discovery
-    @set_ev_cls(event.EventSwitchEnter)
-    def get_topology(self, ev):
-        switch_list = get_switch(self, None)
-        switches = [switch.dp.id for switch in switch_list]
-        self.net.add_nodes_from(switches)
 
-        links = get_link(self, None)
-        for link in links:
-            self.net.add_edge(link.src.dpid, link.dst.dpid)
+class LinkFailureController(EventMixin):
+    def __init__(self):
+        core.openflow.addListeners(self)
+        logp('INFO', 'Controller ready. Waiting for switches...')
 
-        self.logger.info("Topology: %s", self.net.edges())
+    def _handle_ConnectionUp(self, event):
+        SwitchController(event.connection, event.dpid)
 
-    #Link failure detection
-    @set_ev_cls(event.EventLinkDelete)
-    def link_delete_handler(self, ev):
-        link = ev.link
-        src = link.src.dpid
-        dst = link.dst.dpid
 
-        self.logger.info("LINK FAILURE DETECTED: %s -> %s", src, dst)
-
-        if self.net.has_edge(src, dst):
-            self.net.remove_edge(src, dst)
-
-        self.recompute_paths()
-
-    #Recompute paths
-    def recompute_paths(self):
-        self.logger.info("Recomputing paths...")
-
-        for src in self.net.nodes():
-            for dst in self.net.nodes():
-                if src != dst:
-                    try:
-                        path = nx.shortest_path(self.net, src, dst)
-                        self.logger.info("Path %s -> %s : %s", src, dst, path)
-                    except nx.NetworkXNoPath:
-                        self.logger.info("No path between %s and %s", src, dst)
+def launch():
+    core.registerNew(LinkFailureController)

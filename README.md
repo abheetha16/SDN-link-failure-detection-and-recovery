@@ -125,13 +125,16 @@ Include:
 
 * pingall before failure
   
-  <img width="246" height="78" alt="{05B8B5A1-8DA7-4AA7-867E-A7F002D0AAA0}" src="https://github.com/user-attachments/assets/8517c445-ad94-483e-b5fb-22185908c528" />
+<img width="261" height="66" alt="{0215B6B2-257D-4015-B94E-07760181BC73}" src="https://github.com/user-attachments/assets/f820101a-6a9b-4cd8-90a9-2de33e39c489" />
 
 * pingall after failure
-  
-  <img width="243" height="76" alt="{CB974CC0-5B0B-4009-A487-77901CEB25F4}" src="https://github.com/user-attachments/assets/b6518d87-e2a1-406e-bfb3-f4782844d995" />
 
-* Firewall blocking output
+<img width="261" height="90" alt="{B2481006-97B7-4E5D-AA40-E8778636184C}" src="https://github.com/user-attachments/assets/8f073922-3a32-4270-a70f-2856556dd895" />
+
+* ping after link up
+
+<img width="288" height="93" alt="{F34718BC-DB58-40FE-9171-200D3EB99BD5}" src="https://github.com/user-attachments/assets/a1c6ee52-48f9-4615-b8f5-f60fe9abb747" />
+
 
 ---
 
